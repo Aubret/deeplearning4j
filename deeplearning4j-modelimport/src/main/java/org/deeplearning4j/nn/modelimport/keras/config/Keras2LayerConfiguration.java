@@ -18,18 +18,22 @@
 package org.deeplearning4j.nn.modelimport.keras.config;
 
 import lombok.Data;
+import lombok.EqualsAndHashCode;
 
 /**
  * All relevant property fields of keras 2.x layers.
  *
  * @author Max Pumperla
  */
-@Data()
+@Data
+@EqualsAndHashCode(callSuper = false)
 public class Keras2LayerConfiguration extends KerasLayerConfiguration {
 
     /* Basic layer names */
     private final String LAYER_CLASS_NAME_CONVOLUTION_1D = "Conv1D";
     private final String LAYER_CLASS_NAME_CONVOLUTION_2D = "Conv2D";
+    private final String LAYER_CLASS_NAME_CONVOLUTION_3D = "Conv3D";
+
     private final String LAYER_CLASS_NAME_SEPARABLE_CONVOLUTION_2D = "SeparableConv2D";
     private final String LAYER_CLASS_NAME_DECONVOLUTION_2D = "Conv2DTranspose";
 

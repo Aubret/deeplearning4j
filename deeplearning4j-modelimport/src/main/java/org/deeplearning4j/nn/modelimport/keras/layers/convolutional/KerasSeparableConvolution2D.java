@@ -1,6 +1,7 @@
 package org.deeplearning4j.nn.modelimport.keras.layers.convolutional;
 
 import lombok.Data;
+import lombok.EqualsAndHashCode;
 import lombok.extern.slf4j.Slf4j;
 import org.deeplearning4j.nn.api.layers.LayerConstraint;
 import org.deeplearning4j.nn.conf.distribution.Distribution;
@@ -32,6 +33,7 @@ import static org.deeplearning4j.nn.modelimport.keras.utils.KerasLayerUtils.getN
  */
 @Slf4j
 @Data
+@EqualsAndHashCode(callSuper = false)
 public class KerasSeparableConvolution2D extends KerasConvolution {
 
 
@@ -49,7 +51,7 @@ public class KerasSeparableConvolution2D extends KerasConvolution {
      * Constructor from parsed Keras layer configuration dictionary.
      *
      * @param layerConfig dictionary containing Keras layer configuration
-     * @throws InvalidKerasConfigurationException Invalid Keras configuration
+     * @throws InvalidKerasConfigurationException     Invalid Keras configuration
      * @throws UnsupportedKerasConfigurationException Unsupported Keras configuration
      */
     public KerasSeparableConvolution2D(Map<String, Object> layerConfig)
@@ -62,7 +64,7 @@ public class KerasSeparableConvolution2D extends KerasConvolution {
      *
      * @param layerConfig           dictionary containing Keras layer configuration
      * @param enforceTrainingConfig whether to enforce training-related configuration options
-     * @throws InvalidKerasConfigurationException Invalid Keras configuration
+     * @throws InvalidKerasConfigurationException     Invalid Keras configuration
      * @throws UnsupportedKerasConfigurationException Unsupported Keras configuration
      */
     public KerasSeparableConvolution2D(Map<String, Object> layerConfig, boolean enforceTrainingConfig)
@@ -70,8 +72,10 @@ public class KerasSeparableConvolution2D extends KerasConvolution {
         super(layerConfig, enforceTrainingConfig);
 
         hasBias = getHasBiasFromConfig(layerConfig, conf);
-        numTrainableParams = hasBias ? 2 : 1;
+        numTrainableParams = hasBias ? 3 : 2;
         int[] dilationRate = getDilationRate(layerConfig, 2, conf, false);
+
+        int depthMultiplier = getDepthMultiplier(layerConfig, conf);
 
         Pair<WeightInit, Distribution> depthWiseInit = getWeightInitFromConfig(layerConfig,
                 conf.getLAYER_FIELD_DEPTH_WISE_INIT(), enforceTrainingConfig, conf, kerasMajorVersion);
@@ -92,7 +96,7 @@ public class KerasSeparableConvolution2D extends KerasConvolution {
 
         this.weightL1Regularization = KerasRegularizerUtils.getWeightRegularizerFromConfig(
                 layerConfig, conf, conf.getLAYER_FIELD_DEPTH_WISE_REGULARIZER(), conf.getREGULARIZATION_TYPE_L1());
-        this.weightL2Regularization =  KerasRegularizerUtils.getWeightRegularizerFromConfig(
+        this.weightL2Regularization = KerasRegularizerUtils.getWeightRegularizerFromConfig(
                 layerConfig, conf, conf.getLAYER_FIELD_DEPTH_WISE_REGULARIZER(), conf.getREGULARIZATION_TYPE_L2());
 
 
@@ -107,6 +111,7 @@ public class KerasSeparableConvolution2D extends KerasConvolution {
                 .nOut(getNOutFromConfig(layerConfig, conf)).dropOut(this.dropout)
                 .activation(getActivationFromConfig(layerConfig, conf))
                 .weightInit(depthWeightInit)
+                .depthMultiplier(depthMultiplier)
                 .l1(this.weightL1Regularization).l2(this.weightL2Regularization)
                 .convolutionMode(getConvolutionModeFromConfig(layerConfig, conf))
                 .kernelSize(getKernelSizeFromConfig(layerConfig, 2, conf, kerasMajorVersion))
@@ -188,7 +193,7 @@ public class KerasSeparableConvolution2D extends KerasConvolution {
      *
      * @param inputType Array of InputTypes
      * @return output type as InputType
-     * @throws InvalidKerasConfigurationException
+     * @throws InvalidKerasConfigurationException Invalid Keras config
      */
     @Override
     public InputType getOutputType(InputType... inputType) throws InvalidKerasConfigurationException {

@@ -94,7 +94,7 @@ public class ROCBinary extends BaseEvaluation<ROCBinary> {
                 //If mask array is present, pull out the non-masked rows only
                 INDArray m;
                 boolean perExampleMasking = false;
-                if (maskArray.isColumnVector()) {
+                if (maskArray.isColumnVectorOrScalar()) {
                     //Per-example masking
                     m = maskArray;
                     perExampleMasking = true;
@@ -306,6 +306,13 @@ public class ROCBinary extends BaseEvaluation<ROCBinary> {
                 sb.append("\n").append(String.format(pattern, label, auc, getCountActualPositive(i),
                                 getCountActualNegative(i)));
             }
+
+            if(thresholdSteps > 0){
+                sb.append("\n");
+                sb.append("[Note: Thresholded AUC/AUPRC calculation used with ").append(thresholdSteps)
+                        .append(" steps); accuracy may reduced compared to exact mode]");
+            }
+
         } else {
             //Empty evaluation
             sb.append("\n-- No Data --\n");

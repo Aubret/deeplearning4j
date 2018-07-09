@@ -21,6 +21,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.deeplearning4j.nn.conf.InputPreProcessor;
 import org.deeplearning4j.nn.conf.graph.GraphVertex;
 import org.deeplearning4j.nn.conf.inputs.InputType;
+import org.deeplearning4j.nn.conf.layers.FeedForwardLayer;
 import org.deeplearning4j.nn.conf.layers.Layer;
 import org.deeplearning4j.nn.modelimport.keras.config.KerasLayerConfiguration;
 import org.deeplearning4j.nn.modelimport.keras.config.KerasLayerConfigurationFactory;
@@ -36,7 +37,7 @@ import java.util.*;
 /**
  * Build Layer from Keras layer configuration.
  *
- * @author dave@skymind.io
+ * @author dave@skymind.io, Max Pumperla
  */
 @Slf4j
 public class KerasLayer {
@@ -135,7 +136,7 @@ public class KerasLayer {
 
         this.weightL1Regularization = KerasRegularizerUtils.getWeightRegularizerFromConfig(
                 layerConfig, conf, conf.getLAYER_FIELD_W_REGULARIZER(), conf.getREGULARIZATION_TYPE_L1());
-        this.weightL2Regularization =  KerasRegularizerUtils.getWeightRegularizerFromConfig(
+        this.weightL2Regularization = KerasRegularizerUtils.getWeightRegularizerFromConfig(
                 layerConfig, conf, conf.getLAYER_FIELD_W_REGULARIZER(), conf.getREGULARIZATION_TYPE_L2());
         this.dropout = KerasLayerUtils.getDropoutFromConfig(layerConfig, conf);
         KerasLayerUtils.checkForUnsupportedConfigurations(layerConfig, enforceTrainingConfig, conf);
@@ -143,10 +144,11 @@ public class KerasLayer {
 
     /**
      * Register a custom layer
-     * @param layerName name of custom layer
+     *
+     * @param layerName   name of custom layer
      * @param configClass class of custom layer
      */
-     public static void registerCustomLayer(String layerName, Class<? extends KerasLayer> configClass) {
+    public static void registerCustomLayer(String layerName, Class<? extends KerasLayer> configClass) {
         customLayers.put(layerName, configClass);
     }
 
@@ -209,7 +211,7 @@ public class KerasLayer {
      *
      * @return list of inbound layer names
      */
-    List<String> getInboundLayerNames() {
+    public List<String> getInboundLayerNames() {
         if (this.inboundLayerNames == null)
             this.inboundLayerNames = new ArrayList<>();
         return this.inboundLayerNames;
@@ -220,7 +222,7 @@ public class KerasLayer {
      *
      * @param inboundLayerNames list of inbound layer naems
      */
-    void setInboundLayerNames(List<String> inboundLayerNames) {
+    public void setInboundLayerNames(List<String> inboundLayerNames) {
         this.inboundLayerNames = new ArrayList<>(inboundLayerNames);
     }
 
@@ -251,7 +253,7 @@ public class KerasLayer {
         //no op
     }
 
-    public Map<String, INDArray> getWeights() throws InvalidKerasConfigurationException {
+    public Map<String, INDArray> getWeights() {
         return this.weights;
     }
 
@@ -380,7 +382,7 @@ public class KerasLayer {
      * Indicates whether this layer a valid inbound layer. Currently, only
      * (known) DL4J Layers and inputs are valid inbound layers. "Preprocessor"
      * layers (reshaping, merging, etc.) are replaced by their own inbound layers.
-
+     *
      * @return boolean indicating whether layer is valid inbound layer
      * @see org.deeplearning4j.nn.api.Layer
      */

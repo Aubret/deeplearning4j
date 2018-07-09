@@ -1,15 +1,16 @@
 package org.deeplearning4j.nn.graph;
 
 import lombok.extern.slf4j.Slf4j;
-import lombok.val;
 import org.datavec.api.records.reader.RecordReader;
 import org.datavec.api.records.reader.impl.csv.CSVRecordReader;
 import org.datavec.api.split.FileSplit;
 import org.deeplearning4j.BaseDL4JTest;
 import org.deeplearning4j.TestUtils;
 import org.deeplearning4j.datasets.datavec.RecordReaderMultiDataSetIterator;
+import org.deeplearning4j.datasets.iterator.ExistingDataSetIterator;
 import org.deeplearning4j.datasets.iterator.impl.IrisDataSetIterator;
 import org.deeplearning4j.datasets.iterator.impl.MnistDataSetIterator;
+import org.deeplearning4j.datasets.iterator.impl.SingletonMultiDataSetIterator;
 import org.deeplearning4j.eval.Evaluation;
 import org.deeplearning4j.exception.DL4JException;
 import org.deeplearning4j.nn.api.OptimizationAlgorithm;
@@ -25,7 +26,9 @@ import org.deeplearning4j.nn.conf.preprocessor.*;
 import org.deeplearning4j.nn.conf.weightnoise.DropConnect;
 import org.deeplearning4j.nn.gradient.DefaultGradient;
 import org.deeplearning4j.nn.gradient.Gradient;
+import org.deeplearning4j.nn.graph.util.GraphIndices;
 import org.deeplearning4j.nn.multilayer.MultiLayerNetwork;
+import org.deeplearning4j.nn.multilayer.MultiLayerTest;
 import org.deeplearning4j.nn.transferlearning.TransferLearning;
 import org.deeplearning4j.nn.weights.WeightInit;
 import org.deeplearning4j.optimize.listeners.ScoreIterationListener;
@@ -35,9 +38,11 @@ import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.nd4j.linalg.activations.Activation;
+import org.nd4j.linalg.activations.impl.ActivationIdentity;
 import org.nd4j.linalg.api.ndarray.INDArray;
 import org.nd4j.linalg.api.ops.executioner.OpExecutioner;
 import org.nd4j.linalg.dataset.DataSet;
+import org.nd4j.linalg.dataset.api.MultiDataSet;
 import org.nd4j.linalg.dataset.api.iterator.DataSetIterator;
 import org.nd4j.linalg.dataset.api.iterator.MultiDataSetIterator;
 import org.nd4j.linalg.factory.Nd4j;
@@ -48,12 +53,12 @@ import org.nd4j.linalg.learning.config.Adam;
 import org.nd4j.linalg.learning.config.Sgd;
 import org.nd4j.linalg.lossfunctions.LossFunctions;
 import org.nd4j.linalg.primitives.Pair;
+import org.deeplearning4j.nn.workspace.LayerWorkspaceMgr;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 
 import static org.junit.Assert.*;
 
@@ -123,8 +128,8 @@ public class TestComputationGraphNetwork extends BaseDL4JTest {
         assertEquals(activations.size(),feedForward.size());
         assertEquals(activations.get("outputLayer"),feedForward.get(feedForward.size() - 1));
 
-        val graphForward = graph.feedForward(ds.getFeatureMatrix(),0,false);
-        val networkForward =  net.feedForwardToLayer(0,ds.getFeatureMatrix(),false);
+        Map<String,INDArray> graphForward = graph.feedForward(ds.getFeatureMatrix(),0,false);
+        List<INDArray> networkForward =  net.feedForwardToLayer(0,ds.getFeatureMatrix(),false);
         assertEquals(graphForward.get("firstLayer"),networkForward.get(1));
     }
 
@@ -691,7 +696,8 @@ public class TestComputationGraphNetwork extends BaseDL4JTest {
             s.feedForward(new INDArray[]{inData}, true, false); //FF without clearing inputs as we need them later
 
             org.deeplearning4j.nn.layers.OutputLayer ol = (org.deeplearning4j.nn.layers.OutputLayer) s.getLayer(1);
-            Pair<Gradient, INDArray> olPairStd = ol.backpropGradient(null);
+            ol.setLabels(outData);
+            Pair<Gradient, INDArray> olPairStd = ol.backpropGradient(null, LayerWorkspaceMgr.noWorkspaces());
 
             INDArray olEpsilon = olPairStd.getSecond();
 
@@ -750,7 +756,7 @@ public class TestComputationGraphNetwork extends BaseDL4JTest {
 
             // Compute Gradient
             Gradient gradient = graph.backpropGradient(error);
-            graph.getUpdater().update(gradient, 0, 0, minibatch);
+            graph.getUpdater().update(gradient, 0, 0, minibatch, LayerWorkspaceMgr.noWorkspaces());
 
             Nd4j.getWorkspaceManager().destroyAllWorkspacesForCurrentThread();
         }
@@ -1338,10 +1344,20 @@ public class TestComputationGraphNetwork extends BaseDL4JTest {
         assertEquals(30, net.layerSize(2));
         assertEquals(13, net.layerSize(3));
 
+        assertEquals(3, net.layerInputSize(0));
+        assertEquals(0, net.layerInputSize(1));
+        assertEquals(((FeedForwardLayer)net.getLayer(2).conf().getLayer()).getNIn(), net.layerInputSize(2));
+        assertEquals(30, net.layerInputSize(3));
+
         assertEquals(6, net.layerSize("0"));
         assertEquals(0, net.layerSize("1"));
         assertEquals(30, net.layerSize("2"));
         assertEquals(13, net.layerSize("3"));
+
+        assertEquals(3, net.layerInputSize("0"));
+        assertEquals(0, net.layerInputSize("1"));
+        assertEquals(((FeedForwardLayer)net.getLayer(2).conf().getLayer()).getNIn(), net.layerInputSize("2"));
+        assertEquals(30, net.layerInputSize("3"));
     }
 
     @Test
@@ -1371,5 +1387,265 @@ public class TestComputationGraphNetwork extends BaseDL4JTest {
         ComputationGraph net2 = TestUtils.testModelSerialization(net);
         INDArray out2 = net2.outputSingle(ds.getFeatures());
         assertEquals(out, out2);
+    }
+
+    @Test
+    public void scaleVertexGraphTest() {
+        final double scaleFactor = 2;
+        final double[] inputArr = new double[]{-2, -1, 0, 1, 2};//IntStream.rangeClosed(-2, 2).mapToDouble(i -> i).toArray();
+        final double[] expected = new double[inputArr.length];  //DoubleStream.of(inputArr).map(i -> i * scaleFactor).toArray();
+        for( int i=0; i<expected.length; i++ ){
+            expected[i] = inputArr[i] * scaleFactor;
+        }
+
+        final INDArray input = getInputArray4d(inputArr); // Replacing this line with the line below is enough to make test pass
+        //final INDArray input = Nd4j.create(new double[][]{inputArr});
+
+        final String inputName = "input";
+        final String outputName = "output";
+        final String scaleName = "scale";
+        final ComputationGraph graph = new ComputationGraph(new NeuralNetConfiguration.Builder()
+                //.inferenceWorkspaceMode(WorkspaceMode.NONE)
+                .graphBuilder()
+                .addInputs(inputName)
+                .setOutputs(outputName)
+                .setInputTypes(InputType.inferInputType(input))
+                .addVertex(scaleName, new ScaleVertex(scaleFactor), inputName)
+                .addLayer(outputName, new OutputLayer.Builder()
+                        .activation(new ActivationIdentity())
+                        .nOut(input.length())
+                        .biasInit(0)
+                        .build(), scaleName)
+                .build());
+        graph.init();
+
+        //graph.fit(new DataSet(input, Nd4j.ones(input.length()))); // Does not help
+        //graph.feedForward(new INDArray[] {input}, false); // Uncommenting this line is enough to make test pass
+
+        //Hack output layer to be identity mapping
+        graph.getOutputLayer(0).setParam("W", Nd4j.eye(input.length()));
+        graph.getOutputLayer(0).setParam("b", Nd4j.zeros(input.length()));
+        assertEquals("Incorrect output", Nd4j.create(expected), graph.outputSingle(input));
+    }
+
+    private static INDArray getInputArray4d(double[] inputArr) {
+        final INDArray input = Nd4j.create(1, 1, inputArr.length, 1);
+        for (int i = 0; i < input.length(); i++) {
+            input.putScalar(new int[]{0, 0, i, 0}, inputArr[i]);
+        }
+        return input;
+    }
+
+
+
+    @Test
+    public void testGraphOutputIterators(){
+
+        DataSet all = new IrisDataSetIterator(150,150).next();
+        DataSetIterator iter = new IrisDataSetIterator(5,150);
+
+        ComputationGraphConfiguration conf = new NeuralNetConfiguration.Builder()
+                .seed(12345)
+                .graphBuilder()
+                .addInputs("in")
+                .layer("layer", new OutputLayer.Builder().nIn(4).nOut(3).build(), "in")
+                .setOutputs("layer")
+                .build();
+        ComputationGraph cg = new ComputationGraph(conf);
+        cg.init();
+
+
+        INDArray outAll = cg.outputSingle(all.getFeatures());
+        INDArray outIter = cg.outputSingle(iter);
+
+        assertEquals(outAll, outIter);
+    }
+
+
+    @Test
+    public void testComputationGraphConfgurationActivationTypes(){
+
+        //Test for a simple net:
+
+        ComputationGraphConfiguration.GraphBuilder builder = new NeuralNetConfiguration.Builder()
+                .graphBuilder()
+                .addInputs("in1", "in2")
+                .layer("0", new DenseLayer.Builder().nOut(10).build(), "in1")
+                .layer("1", new DenseLayer.Builder().nOut(9).build(), "in1", "in2")
+                .layer("2", new DenseLayer.Builder().nOut(8).build(), "in2")
+                .layer("3", new DenseLayer.Builder().nOut(7).build(), "0")
+                .layer("4", new DenseLayer.Builder().nOut(6).build(), "1", "2")
+                .setInputTypes(InputType.feedForward(5), InputType.feedForward(6))
+                .allowNoOutput(true);
+
+        ComputationGraphConfiguration conf = builder.build();
+
+        Map<String,InputType> actBuilder = builder.getLayerActivationTypes();
+        Map<String,InputType> actConf = conf.getLayerActivationTypes(InputType.feedForward(5), InputType.feedForward(6));
+
+        Map<String, InputType> exp = new HashMap<>();
+        exp.put("in1", InputType.feedForward(5));
+        exp.put("in2", InputType.feedForward(6));
+        exp.put("0", InputType.feedForward(10));
+        exp.put("1", InputType.feedForward(9));
+        exp.put("1-merge", InputType.feedForward(5+6));
+        exp.put("2", InputType.feedForward(8));
+        exp.put("3", InputType.feedForward(7));
+        exp.put("4", InputType.feedForward(6));
+        exp.put("4-merge", InputType.feedForward(9+8));
+
+        assertEquals(exp, actBuilder);
+        assertEquals(exp, actConf);
+    }
+
+
+
+
+    @Test
+    public void testTopoSortSaving(){
+
+        ComputationGraphConfiguration conf = new NeuralNetConfiguration.Builder()
+                .graphBuilder()
+                .addInputs("in1", "in2")
+                .addLayer("l0", new DenseLayer.Builder().nIn(10).nOut(10).build(), "in1")
+                .addLayer("l1", new DenseLayer.Builder().nIn(20).nOut(10).build(), "in1", "in2")
+                .addLayer("l2", new DenseLayer.Builder().nIn(10).nOut(10).build(), "in2")
+                .addLayer("l3", new DenseLayer.Builder().nIn(10).nOut(10).build(), "l0")
+                .addLayer("l4", new DenseLayer.Builder().nIn(10).nOut(10).build(), "l1")
+                .addLayer("l5", new DenseLayer.Builder().nIn(10).nOut(10).build(), "l2")
+                .addLayer("l6", new OutputLayer.Builder().nIn(20).nOut(10).build(), "l3", "l5")
+                .addLayer("l7", new OutputLayer.Builder().nIn(10).nOut(10).build(), "l4")
+                .setOutputs("l6", "l7")
+                .build();
+
+        INDArray[] in = new INDArray[]{
+                Nd4j.rand(3, 10),
+                Nd4j.rand(3, 10)};
+
+        ComputationGraph cg = new ComputationGraph(conf);
+        cg.init();
+
+        GraphIndices indices = cg.calculateIndices();
+
+        int[] order = cg.topologicalSortOrder();
+        List<String> strOrder = cg.getConfiguration().getTopologicalOrderStr();
+        INDArray[] out1 = cg.output(in);
+
+        //Check it's the same after loading:
+        ComputationGraph cg2 = TestUtils.testModelSerialization(cg);
+        int[] order2 = cg2.topologicalSortOrder();
+        List<String> strOrder2 = cg.getConfiguration().getTopologicalOrderStr();
+        assertArrayEquals(order, order2);
+        assertEquals(strOrder, strOrder2);
+
+        INDArray[] out2 = cg2.output(in);
+        assertArrayEquals(out1, out2);
+
+        //Delete the topological order, ensure it gets recreated properly:
+        ComputationGraphConfiguration conf3 = cg2.getConfiguration().clone();
+        conf3.setTopologicalOrder(null);
+        conf3.setTopologicalOrderStr(null);
+        ComputationGraph cg3 = new ComputationGraph(conf3);
+        cg3.init();
+        cg3.setParams(cg2.params());
+
+        int[] order3 = cg3.topologicalSortOrder();
+        List<String> strOrder3 = cg.getConfiguration().getTopologicalOrderStr();
+        INDArray[] out3 = cg3.output(in);
+        assertArrayEquals(order, order3);
+        assertEquals(strOrder, strOrder3);
+        assertArrayEquals(out1, out3);
+
+
+        //Now, change the order, and ensure the net is the same... note that we can do [l0, l1, l2] in any order
+        List<List<String>> someValidOrders = new ArrayList<>();
+        someValidOrders.add(Arrays.asList("in1", "in2", "l0", "l1-merge", "l1", "l2", "l3", "l4", "l5", "l6-merge", "l6", "l7"));
+        someValidOrders.add(Arrays.asList("in1", "in2", "l1-merge", "l1", "l0", "l2", "l3", "l4", "l5", "l6-merge", "l6", "l7"));
+        someValidOrders.add(Arrays.asList("in1", "in2", "l2", "l1-merge", "l1", "l0", "l3", "l4", "l5", "l6-merge", "l6", "l7"));
+        someValidOrders.add(Arrays.asList("in1", "in2", "l2", "l5", "l0", "l1-merge", "l1", "l3", "l4", "l7", "l6-merge", "l6"));
+
+        for(List<String> l : someValidOrders){
+            assertEquals(strOrder.size(), l.size());
+        }
+
+        for( int i=0; i<someValidOrders.size(); i++ ){
+            List<String> l = someValidOrders.get(i);
+            int[] arr = new int[l.size()];
+            int j=0;
+            for(String s : l){
+                arr[j++] = indices.getNameToIdx().get(s);
+            }
+
+            ComputationGraphConfiguration conf2 = conf.clone();
+            conf2.setTopologicalOrderStr(l);
+            conf2.setTopologicalOrder(arr);
+
+            ComputationGraph g = new ComputationGraph(conf2);
+            g.init();
+            g.setParamTable(cg.paramTable());
+            int[] origOrder = g.topologicalSortOrder();
+
+            INDArray[] out4 = g.output(in);
+            assertArrayEquals(out1, out4);
+
+            ComputationGraph g2 = TestUtils.testModelSerialization(g);
+            int[] loadedOrder = g2.topologicalSortOrder();
+
+            assertArrayEquals(origOrder, loadedOrder);
+
+            INDArray[] out5 = g2.output(in);
+            assertArrayEquals(out1, out5);
+        }
+    }
+
+    @Test
+    public void testPretrainFitMethods(){
+
+        //The fit methods should *not* do layerwise pretraining:
+
+        ComputationGraphConfiguration conf = new NeuralNetConfiguration.Builder()
+
+                .graphBuilder()
+                .addInputs("in")
+                .layer("0", new VariationalAutoencoder.Builder()
+                        .nIn(10).nOut(10).encoderLayerSizes(10).decoderLayerSizes(10).build(), "in")
+                .layer("1", new OutputLayer.Builder().nIn(10).nOut(10).build(), "0")
+                .setOutputs("1")
+                .pretrain(true).backprop(true)
+                .build();
+
+        ComputationGraph net = new ComputationGraph(conf);
+        net.init();
+
+        Set<Class<?>> exp = new HashSet<>();
+        exp.add(ComputationGraph.class);
+
+        MultiLayerTest.CheckModelsListener listener = new MultiLayerTest.CheckModelsListener();
+        net.setListeners(listener);
+
+        INDArray f = Nd4j.create(1,10);
+        INDArray l = Nd4j.create(1,10);
+        DataSet ds = new DataSet(f,l);
+        MultiDataSet mds = new org.nd4j.linalg.dataset.MultiDataSet(f,l);
+
+        DataSetIterator iter = new ExistingDataSetIterator(Collections.singletonList(ds));
+
+        net.fit(ds);
+        assertEquals(exp, listener.getModelClasses());
+
+        net.fit(iter);
+        assertEquals(exp, listener.getModelClasses());
+
+        net.fit(new INDArray[]{f}, new INDArray[]{l});
+        assertEquals(exp, listener.getModelClasses());
+
+        net.fit(new INDArray[]{f}, new INDArray[]{l}, null, null);
+        assertEquals(exp, listener.getModelClasses());
+
+        net.fit(mds);
+        assertEquals(exp, listener.getModelClasses());
+
+        net.fit(new SingletonMultiDataSetIterator(mds));
+        assertEquals(exp, listener.getModelClasses());
     }
 }

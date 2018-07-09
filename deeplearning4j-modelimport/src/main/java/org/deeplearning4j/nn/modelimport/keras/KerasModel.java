@@ -18,6 +18,7 @@
 
 package org.deeplearning4j.nn.modelimport.keras;
 
+import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
 import org.deeplearning4j.nn.api.layers.IOutputLayer;
 import org.deeplearning4j.nn.conf.BackpropType;
@@ -51,9 +52,10 @@ import static org.deeplearning4j.nn.modelimport.keras.KerasLayer.customLayers;
  * Build ComputationGraph from Keras (Functional API) Model or
  * Sequential model configuration.
  *
- * @author dave@skymind.io
+ * @author dave@skymind.io, Max Pumperla
  */
 @Slf4j
+@Data
 public class KerasModel {
 
     protected static KerasModelConfiguration config = new KerasModelConfiguration();
@@ -62,14 +64,14 @@ public class KerasModel {
     protected String className; // Keras model class name
     protected boolean enforceTrainingConfig; // whether to build model in training mode
     protected Map<String, KerasLayer> layers; // map from layer name to KerasLayer
-    List<KerasLayer> layersOrdered; // ordered list of layers
-    Map<String, InputType> outputTypes; // inferred output types for all layers
-    ArrayList<String> inputLayerNames; // list of input layers
-    ArrayList<String> outputLayerNames; // list of output layers
-    boolean useTruncatedBPTT = false; // whether to use truncated BPTT
-    int truncatedBPTT = 0; // truncated BPTT value
-    int kerasMajorVersion;
-    String kerasBackend;
+    protected List<KerasLayer> layersOrdered; // ordered list of layers
+    protected Map<String, InputType> outputTypes; // inferred output types for all layers
+    protected ArrayList<String> inputLayerNames; // list of input layers
+    protected ArrayList<String> outputLayerNames; // list of output layers
+    protected boolean useTruncatedBPTT = false; // whether to use truncated BPTT
+    protected int truncatedBPTT = 0; // truncated BPTT value
+    protected int kerasMajorVersion;
+    protected String kerasBackend;
 
     public KerasModel() {
     }
@@ -82,15 +84,15 @@ public class KerasModel {
      * (Recommended) Builder-pattern constructor for (Functional API) Model.
      *
      * @param modelBuilder builder object
-     * @throws IOException
-     * @throws InvalidKerasConfigurationException
-     * @throws UnsupportedKerasConfigurationException
+     * @throws IOException                            IO exception
+     * @throws InvalidKerasConfigurationException     Invalid Keras config
+     * @throws UnsupportedKerasConfigurationException Unsupported Keras config
      */
     public KerasModel(KerasModelBuilder modelBuilder)
             throws UnsupportedKerasConfigurationException, IOException, InvalidKerasConfigurationException {
         this(modelBuilder.getModelJson(), modelBuilder.getModelYaml(), modelBuilder.getWeightsArchive(),
                 modelBuilder.getWeightsRoot(), modelBuilder.getTrainingJson(), modelBuilder.getTrainingArchive(),
-                modelBuilder.isEnforceTrainingConfig());
+                modelBuilder.isEnforceTrainingConfig(), modelBuilder.getInputShape());
     }
 
     /**
@@ -103,12 +105,13 @@ public class KerasModel {
      * @param modelJson             model configuration JSON string
      * @param modelYaml             model configuration YAML string
      * @param enforceTrainingConfig whether to enforce training-related configurations
-     * @throws IOException
-     * @throws InvalidKerasConfigurationException
-     * @throws UnsupportedKerasConfigurationException
+     * @throws IOException                            IO exception
+     * @throws InvalidKerasConfigurationException     Invalid Keras config
+     * @throws UnsupportedKerasConfigurationException Unsupported Keras config
      */
     protected KerasModel(String modelJson, String modelYaml, Hdf5Archive weightsArchive, String weightsRoot,
-                         String trainingJson, Hdf5Archive trainingArchive, boolean enforceTrainingConfig)
+                         String trainingJson, Hdf5Archive trainingArchive, boolean enforceTrainingConfig,
+                         int[] inputShape)
             throws IOException, InvalidKerasConfigurationException, UnsupportedKerasConfigurationException {
 
         Map<String, Object> modelConfig = KerasModelUtils.parseModelConfig(modelJson, modelYaml);
@@ -157,11 +160,17 @@ public class KerasModel {
         prepareLayers((List<Object>) layerLists.get((config.getModelFieldLayers())));
 
         /* Import training configuration. */
-        if (trainingJson != null && enforceTrainingConfig)
-            importTrainingConfiguration(trainingJson);
+        if (enforceTrainingConfig) {
+            if (trainingJson != null)
+                importTrainingConfiguration(trainingJson);
+            else log.warn("If enforceTrainingConfig is true, a training " +
+                    "configuration object has to be provided. Usually the only practical way to do this is to store" +
+                    " your keras model with `model.save('model_path.h5'. If you store model config and weights" +
+                    " separately no training configuration is attached.");
+        }
 
         /* Infer output types for each layer. */
-        inferOutputTypes();
+        inferOutputTypes(inputShape);
 
         /* Store weights in layers. */
         if (weightsArchive != null)
@@ -174,7 +183,7 @@ public class KerasModel {
      *
      * @param layerConfigs List of Keras layer configurations
      */
-     void prepareLayers(List<Object> layerConfigs)
+    void prepareLayers(List<Object> layerConfigs)
             throws InvalidKerasConfigurationException, UnsupportedKerasConfigurationException {
         this.layersOrdered = new ArrayList<>();
         this.layers = new HashMap<>();
@@ -202,11 +211,11 @@ public class KerasModel {
      * Includes loss function, optimization details, etc.
      *
      * @param trainingConfigJson JSON containing Keras training configuration
-     * @throws IOException
-     * @throws InvalidKerasConfigurationException
-     * @throws UnsupportedKerasConfigurationException
+     * @throws IOException                            IO exception
+     * @throws InvalidKerasConfigurationException     Invalid Keras config
+     * @throws UnsupportedKerasConfigurationException Unsupported Keras config
      */
-    protected void importTrainingConfiguration(String trainingConfigJson)
+    void importTrainingConfiguration(String trainingConfigJson)
             throws IOException, InvalidKerasConfigurationException, UnsupportedKerasConfigurationException {
         Map<String, Object> trainingConfig = KerasModelUtils.parseJsonString(trainingConfigJson);
 
@@ -245,12 +254,15 @@ public class KerasModel {
      * Helper method called from constructor. Infers and records output type
      * for every layer.
      */
-    protected void inferOutputTypes()
+    void inferOutputTypes(int[] inputShape)
             throws InvalidKerasConfigurationException, UnsupportedKerasConfigurationException {
         this.outputTypes = new HashMap<>();
         for (KerasLayer layer : this.layersOrdered) {
             InputType outputType;
             if (layer instanceof KerasInput) {
+                if (inputShape != null) {
+                    layer.inputShape = inputShape;
+                }
                 outputType = layer.getOutputType();
                 this.truncatedBPTT = ((KerasInput) layer).getTruncatedBptt();
             } else {
@@ -258,7 +270,7 @@ public class KerasModel {
                 int i = 0;
                 for (String inboundLayerName : layer.getInboundLayerNames())
                     inputTypes[i++] = this.outputTypes.get(inboundLayerName);
-                    outputType = layer.getOutputType(inputTypes);
+                outputType = layer.getOutputType(inputTypes);
             }
             this.outputTypes.put(layer.getLayerName(), outputType);
         }
@@ -318,17 +330,10 @@ public class KerasModel {
                 if (preprocessor != null)
                     preprocessors.put(layer.getLayerName(), preprocessor);
                 graphBuilder.addLayer(layer.getLayerName(), layer.getLayer(), inboundLayerNamesArray);
-                if (this.outputLayerNames.contains(layer.getLayerName()) && !(layer.getLayer() instanceof IOutputLayer))
-                    log.warn("Model cannot be trained: output layer " + layer.getLayerName()
-                            + " is not an IOutputLayer (no loss function specified)");
             } else if (layer.isVertex()) { // Ignore "preprocessor" layers for now
                 if (preprocessor != null)
                     preprocessors.put(layer.getLayerName(), preprocessor);
                 graphBuilder.addVertex(layer.getLayerName(), layer.getVertex(), inboundLayerNamesArray);
-                if (this.outputLayerNames.contains(layer.getLayerName())
-                        && !(layer.getVertex() instanceof IOutputLayer))
-                    log.warn("Model cannot be trained: output vertex " + layer.getLayerName()
-                            + " is not an IOutputLayer (no loss function specified)");
             } else if (layer.isInputPreProcessor()) {
                 if (preprocessor == null)
                     throw new UnsupportedKerasConfigurationException("Layer " + layer.getLayerName()
@@ -336,10 +341,6 @@ public class KerasModel {
                 graphBuilder.addVertex(layer.getLayerName(), new PreprocessorVertex(preprocessor),
                         inboundLayerNamesArray);
             }
-
-            if (this.outputLayerNames.contains(layer.getLayerName()))
-                log.warn("Model cannot be trained: output " + layer.getLayerName()
-                        + " is not an IOutputLayer (no loss function specified)");
         }
         graphBuilder.setInputPreProcessors(preprocessors);
 

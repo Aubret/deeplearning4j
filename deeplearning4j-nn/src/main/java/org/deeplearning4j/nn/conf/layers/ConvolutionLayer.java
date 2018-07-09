@@ -6,17 +6,16 @@ import lombok.NoArgsConstructor;
 import lombok.ToString;
 import org.deeplearning4j.nn.api.Layer;
 import org.deeplearning4j.nn.api.ParamInitializer;
-import org.deeplearning4j.nn.conf.*;
-import org.deeplearning4j.nn.conf.distribution.Distribution;
+import org.deeplearning4j.nn.conf.CacheMode;
+import org.deeplearning4j.nn.conf.ConvolutionMode;
+import org.deeplearning4j.nn.conf.InputPreProcessor;
+import org.deeplearning4j.nn.conf.NeuralNetConfiguration;
 import org.deeplearning4j.nn.conf.inputs.InputType;
 import org.deeplearning4j.nn.conf.memory.LayerMemoryReport;
 import org.deeplearning4j.nn.conf.memory.MemoryReport;
 import org.deeplearning4j.nn.params.ConvolutionParamInitializer;
-import org.deeplearning4j.nn.weights.WeightInit;
-import org.deeplearning4j.optimize.api.IterationListener;
+import org.deeplearning4j.optimize.api.TrainingListener;
 import org.deeplearning4j.util.ConvolutionUtils;
-import org.nd4j.linalg.activations.Activation;
-import org.nd4j.linalg.activations.IActivation;
 import org.nd4j.linalg.api.ndarray.INDArray;
 
 import java.util.Collection;
@@ -37,6 +36,7 @@ public class ConvolutionLayer extends FeedForwardLayer {
     protected int[] kernelSize; // Square filter
     protected int[] stride; // Default is 2. Down-sample by a factor of 2
     protected int[] padding;
+    protected boolean cudnnAllowFallback = true;
 
     /** The "PREFER_FASTEST" mode will pick the fastest algorithm for the specified parameters
      * from the {@link FwdAlgo}, {@link BwdFilterAlgo}, and {@link BwdDataAlgo} lists, but they
@@ -83,28 +83,34 @@ public class ConvolutionLayer extends FeedForwardLayer {
     /**
      * ConvolutionLayer
      * nIn in the input layer is the number of channels
-     * nOut is the number of filters to be used in the net or in other words the depth
+     * nOut is the number of filters to be used in the net or in other words the channels
      * The builder specifies the filter/kernel size, the stride and padding
      * The pooling layer takes the kernel size
      */
     protected ConvolutionLayer(BaseConvBuilder<?> builder) {
         super(builder);
+        int dim = builder.convolutionDim;
+
         this.hasBias = builder.hasBias;
         this.convolutionMode = builder.convolutionMode;
         this.dilation = builder.dilation;
-        if (builder.kernelSize.length != 2)
-            throw new IllegalArgumentException("Kernel size of should be rows x columns (a 2d array)");
+        if (builder.kernelSize.length != dim)
+            throw new IllegalArgumentException("Kernel argument should be a " + dim + "d array");
         this.kernelSize = builder.kernelSize;
-        if (builder.stride.length != 2)
-            throw new IllegalArgumentException("Stride should include stride for rows and columns (a 2d array)");
+        if (builder.stride.length != dim)
+            throw new IllegalArgumentException("Strides argument should be a " + dim + "d array");
         this.stride = builder.stride;
-        if (builder.padding.length != 2)
-            throw new IllegalArgumentException("Padding should include padding for rows and columns (a 2d array)");
+        if (builder.padding.length != dim)
+            throw new IllegalArgumentException("Padding argument should be a " + dim + "d array");
         this.padding = builder.padding;
+        if (builder.dilation.length != dim)
+            throw new IllegalArgumentException("Dilation argument should be a " + dim + "d array");
+        this.dilation = builder.dilation;
         this.cudnnAlgoMode = builder.cudnnAlgoMode;
         this.cudnnFwdAlgo = builder.cudnnFwdAlgo;
         this.cudnnBwdFilterAlgo = builder.cudnnBwdFilterAlgo;
         this.cudnnBwdDataAlgo = builder.cudnnBwdDataAlgo;
+        this.cudnnAllowFallback = builder.cudnnAllowFallback;
 
         initializeConstraints(builder);
     }
@@ -126,13 +132,13 @@ public class ConvolutionLayer extends FeedForwardLayer {
     }
 
     @Override
-    public Layer instantiate(NeuralNetConfiguration conf, Collection<IterationListener> iterationListeners,
+    public Layer instantiate(NeuralNetConfiguration conf, Collection<TrainingListener> trainingListeners,
                     int layerIndex, INDArray layerParamsView, boolean initializeParams) {
         LayerValidation.assertNInNOutSet("ConvolutionLayer", getLayerName(), layerIndex, getNIn(), getNOut());
 
         org.deeplearning4j.nn.layers.convolution.ConvolutionLayer ret =
                         new org.deeplearning4j.nn.layers.convolution.ConvolutionLayer(conf);
-        ret.setListeners(iterationListeners);
+        ret.setListeners(trainingListeners);
         ret.setIndex(layerIndex);
         ret.setParamsViewArray(layerParamsView);
         Map<String, INDArray> paramTable = initializer().init(conf, layerParamsView, initializeParams);
@@ -166,7 +172,7 @@ public class ConvolutionLayer extends FeedForwardLayer {
 
         if (nIn <= 0 || override) {
             InputType.InputTypeConvolutional c = (InputType.InputTypeConvolutional) inputType;
-            this.nIn = c.getDepth();
+            this.nIn = c.getChannels();
         }
     }
 
@@ -216,7 +222,7 @@ public class ConvolutionLayer extends FeedForwardLayer {
 
         //During forward pass: im2col array, mmul (result activations), in-place broadcast add
         int im2colSizePerEx =
-                        c.getDepth() * outputType.getHeight() * outputType.getWidth() * kernelSize[0] * kernelSize[1];
+                        c.getChannels() * outputType.getHeight() * outputType.getWidth() * kernelSize[0] * kernelSize[1];
 
         //During training: have im2col array, in-place gradient calculation, then epsilons...
         //But: im2col array may be cached...
@@ -306,6 +312,7 @@ public class ConvolutionLayer extends FeedForwardLayer {
     }
 
     protected static abstract class BaseConvBuilder<T extends BaseConvBuilder<T>> extends FeedForwardLayer.Builder<T> {
+        protected int convolutionDim = 2; // 2D convolution by default
         protected boolean hasBias = true;
         protected ConvolutionMode convolutionMode = null;
         protected int[] dilation = new int[]{1, 1};
@@ -316,7 +323,30 @@ public class ConvolutionLayer extends FeedForwardLayer {
         protected FwdAlgo cudnnFwdAlgo;
         protected BwdFilterAlgo cudnnBwdFilterAlgo;
         protected BwdDataAlgo cudnnBwdDataAlgo;
+        protected boolean cudnnAllowFallback = true;
 
+
+        protected BaseConvBuilder(int[] kernelSize, int[] stride, int[] padding, int[] dilation, int dim) {
+            this.kernelSize = kernelSize;
+            this.stride = stride;
+            this.padding = padding;
+            this.dilation = dilation;
+            this.convolutionDim = dim;
+        }
+
+        protected BaseConvBuilder(int[] kernelSize, int[] stride, int[] padding, int[] dilation) {
+            this.kernelSize = kernelSize;
+            this.stride = stride;
+            this.padding = padding;
+            this.dilation = dilation;
+        }
+
+        protected BaseConvBuilder(int[] kernelSize, int[] stride, int[] padding, int dim) {
+            this.kernelSize = kernelSize;
+            this.stride = stride;
+            this.padding = padding;
+            this.convolutionDim = dim;
+        }
 
         protected BaseConvBuilder(int[] kernelSize, int[] stride, int[] padding) {
             this.kernelSize = kernelSize;
@@ -324,10 +354,23 @@ public class ConvolutionLayer extends FeedForwardLayer {
             this.padding = padding;
         }
 
+        protected BaseConvBuilder(int[] kernelSize, int[] stride, int dim) {
+            this.kernelSize = kernelSize;
+            this.stride = stride;
+            this.convolutionDim = dim;
+        }
+
+
         protected BaseConvBuilder(int[] kernelSize, int[] stride) {
             this.kernelSize = kernelSize;
             this.stride = stride;
         }
+
+        protected BaseConvBuilder(int dim, int... kernelSize) {
+            this.kernelSize = kernelSize;
+            this.convolutionDim = dim;
+        }
+
 
         protected BaseConvBuilder(int... kernelSize) {
             this.kernelSize = kernelSize;
@@ -391,6 +434,18 @@ public class ConvolutionLayer extends FeedForwardLayer {
 
         public T cudnnBwdDataMode(BwdDataAlgo cudnnBwdDataAlgo) {
             this.cudnnBwdDataAlgo = cudnnBwdDataAlgo;
+            return (T) this;
+        }
+
+        /**
+         * When using CuDNN and an error is encountered, should fallback to the non-CuDNN implementatation be allowed?
+         * If set to false, an exception in CuDNN will be propagated back to the user. If false, the built-in (non-CuDNN)
+         * implementation for ConvolutionLayer will be used
+         *
+         * @param allowFallback Whether fallback to non-CuDNN implementation should be used
+         */
+        public T cudnnAllowFallback(boolean allowFallback){
+            this.cudnnAllowFallback = allowFallback;
             return (T) this;
         }
     }

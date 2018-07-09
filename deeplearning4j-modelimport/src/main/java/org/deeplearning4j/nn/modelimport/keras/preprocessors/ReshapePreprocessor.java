@@ -18,13 +18,17 @@
 package org.deeplearning4j.nn.modelimport.keras.preprocessors;
 
 import lombok.Data;
+import lombok.EqualsAndHashCode;
 import lombok.extern.slf4j.Slf4j;
 
 import org.apache.commons.lang3.ArrayUtils;
 import org.deeplearning4j.nn.conf.inputs.InputType;
 import org.deeplearning4j.nn.conf.inputs.InvalidInputTypeException;
 import org.deeplearning4j.nn.conf.preprocessor.BaseInputPreProcessor;
+import org.deeplearning4j.nn.workspace.ArrayType;
 import org.nd4j.linalg.api.ndarray.INDArray;
+import org.deeplearning4j.nn.workspace.LayerWorkspaceMgr;
+import org.nd4j.linalg.api.shape.Shape;
 
 import java.util.Arrays;
 
@@ -35,6 +39,7 @@ import java.util.Arrays;
  */
 @Data
 @Slf4j
+@EqualsAndHashCode(callSuper = false)
 public class ReshapePreprocessor extends BaseInputPreProcessor {
 
     private int[] inputShape;
@@ -63,13 +68,13 @@ public class ReshapePreprocessor extends BaseInputPreProcessor {
             if (i == 0)
                 miniBatchShape[i] = miniBatchSize;
             else
-                miniBatchShape[i] = shape[i-1];
+                miniBatchShape[i] = shape[i - 1];
         }
         return miniBatchShape;
     }
 
     @Override
-    public INDArray preProcess(INDArray input, int miniBatchSize) {
+    public INDArray preProcess(INDArray input, int miniBatchSize, LayerWorkspaceMgr workspaceMgr) {
         // the target shape read from a keras config does not have mini-batch size
         // included. We prepend it here dynamically.
         if (targetShape.length + 1 == input.shape().length) {
@@ -84,7 +89,12 @@ public class ReshapePreprocessor extends BaseInputPreProcessor {
             this.miniBatchSize = miniBatchSize;
         }
         if (prod(input.shape()) == prod((targetShape))) {
-            return input.reshape(this.targetShape);
+            if(input.ordering() != 'c' || !Shape.hasDefaultStridesForShape(input)){
+                input = workspaceMgr.dup(ArrayType.ACTIVATIONS, input, 'c');
+            }
+            int[] shp =  inputShape;
+            int[] outShp = targetShape;
+            return workspaceMgr.leverageTo(ArrayType.ACTIVATIONS, input.reshape(this.targetShape));
         } else {
             throw new IllegalStateException("Input shape " + Arrays.toString(input.shape())
                     + " and output shape" + Arrays.toString(inputShape) + " do not match");
@@ -92,13 +102,16 @@ public class ReshapePreprocessor extends BaseInputPreProcessor {
     }
 
     @Override
-    public INDArray backprop(INDArray output, int miniBatchSize) {
+    public INDArray backprop(INDArray output, int miniBatchSize, LayerWorkspaceMgr workspaceMgr) {
         if (!Arrays.equals(targetShape, output.shape())) {
             throw new IllegalStateException("Unexpected output shape" + Arrays.toString(output.shape())
                     + " (expected to be " + Arrays.toString(targetShape) + ")");
         }
         if (prod(output.shape()) == prod((targetShape))) {
-            return output.reshape(this.inputShape);
+            if(output.ordering() != 'c' || !Shape.hasDefaultStridesForShape(output)){
+                output = workspaceMgr.dup(ArrayType.ACTIVATIONS, output, 'c');
+            }
+            return workspaceMgr.leverageTo(ArrayType.ACTIVATION_GRAD, output.reshape(this.inputShape));
         } else {
             throw new IllegalStateException("Output shape" + Arrays.toString(output.shape())
                     + " and input shape" + Arrays.toString(targetShape) + " do not match");
@@ -115,8 +128,7 @@ public class ReshapePreprocessor extends BaseInputPreProcessor {
             case 3:
                 return InputType.recurrent(shape[1]);
             case 4:
-                // TODO: make sure to cover TF/NHWC and TH/NCHW orderings
-                return InputType.convolutional(shape[1], shape[2], shape[3]);
+                return InputType.convolutional(shape[2], shape[3], shape[1]);
             default:
                 throw new UnsupportedOperationException(
                         "Cannot infer input type for reshape array " + Arrays.toString(shape));

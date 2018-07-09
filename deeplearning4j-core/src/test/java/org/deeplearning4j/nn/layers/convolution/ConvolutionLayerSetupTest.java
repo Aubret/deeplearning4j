@@ -355,7 +355,7 @@ public class ConvolutionLayerSetupTest extends BaseDL4JTest {
     @Test
     public void testSpaceToDepth() {
 
-        int[] blocks = new int[] {2, 2};
+        int blocks = 2;
 
         MultiLayerConfiguration.Builder builder = new NeuralNetConfiguration.Builder().list()
                 //(28-2+0)/2+1 = 14 -> 14x14x3 out
@@ -402,7 +402,7 @@ public class ConvolutionLayerSetupTest extends BaseDL4JTest {
         network.init();
 
         network.setInput(next.getFeatureMatrix());
-        INDArray activationsActual = network.preOutput(next.getFeatureMatrix());
+        INDArray activationsActual = network.activate(next.getFeatureMatrix());
         assertEquals(10, activationsActual.shape()[1], 1e-2);
 
         network.fit(next);

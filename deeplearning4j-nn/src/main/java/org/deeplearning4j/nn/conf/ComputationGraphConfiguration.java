@@ -28,6 +28,7 @@ import org.deeplearning4j.nn.conf.layers.Layer;
 import org.deeplearning4j.nn.conf.layers.OutputLayer;
 import org.deeplearning4j.nn.conf.memory.MemoryReport;
 import org.deeplearning4j.nn.conf.memory.NetworkMemoryReport;
+import org.nd4j.base.Preconditions;
 import org.nd4j.linalg.activations.Activation;
 import org.nd4j.linalg.activations.IActivation;
 import org.nd4j.shade.jackson.databind.JsonNode;
@@ -64,11 +65,11 @@ public class ComputationGraphConfiguration implements Serializable, Cloneable {
 
     @Getter
     @Setter
-    protected WorkspaceMode trainingWorkspaceMode = WorkspaceMode.SEPARATE;
+    protected WorkspaceMode trainingWorkspaceMode = WorkspaceMode.ENABLED;
 
     @Getter
     @Setter
-    protected WorkspaceMode inferenceWorkspaceMode = WorkspaceMode.SEPARATE;
+    protected WorkspaceMode inferenceWorkspaceMode = WorkspaceMode.ENABLED;
 
     @Getter
     @Setter
@@ -100,6 +101,8 @@ public class ComputationGraphConfiguration implements Serializable, Cloneable {
     //Counter for the number of epochs completed so far. Used for per-epoch schedules
     protected int epochCount = 0;
 
+    protected int[] topologicalOrder;
+    protected List<String> topologicalOrderStr;
 
     /**
      * @return JSON representation of configuration
@@ -159,7 +162,14 @@ public class ComputationGraphConfiguration implements Serializable, Cloneable {
         ComputationGraphConfiguration conf;
         try {
             conf = mapper.readValue(json, ComputationGraphConfiguration.class);
-        } catch (IOException e) {
+        } catch (Exception e) {
+            //Check if this exception came from legacy legacy deserializer...
+            String msg = e.getMessage();
+            if(msg != null && msg.contains("legacy")){
+                throw new RuntimeException("Error deserializing ComputationGraphConfiguration - configuration may have a custom " +
+                        "layer, vertex or preprocessor, in pre version 1.0.0-alpha JSON format. These layers can be " +
+                        "deserialized by first registering them with NeuralNetConfiguration.registerLegacyCustomClassesForJSON(Class...)", e);
+            }
             throw new RuntimeException(e);
         }
 
@@ -262,7 +272,7 @@ public class ComputationGraphConfiguration implements Serializable, Cloneable {
      * @throws IllegalStateException if configuration is not valid
      */
     public void validate() {
-        validate(false);
+        validate(false, false);
     }
 
     /**
@@ -273,15 +283,16 @@ public class ComputationGraphConfiguration implements Serializable, Cloneable {
      *                          it's output activations don't go anywhere
      * @throws IllegalStateException if configuration is not valid
      */
-    public void validate(boolean allowDisconnected){
+    public void validate(boolean allowDisconnected, boolean allowNoOutput){
 
         if (networkInputs == null || networkInputs.isEmpty()) {
-            throw new IllegalStateException(
-                            "Invalid configuration: network has no inputs. Use .addInputs(String...) to label (and give an ordering to) the network inputs");
+            throw new IllegalStateException( "Invalid configuration: network has no inputs. " +
+                    "Use .addInputs(String...) to label (and give an ordering to) the network inputs");
         }
-        if (networkOutputs == null || networkOutputs.isEmpty()) {
-            throw new IllegalStateException(
-                            "Invalid configuration: network has no outputs. Use .setOutput(String...) to specify (and give an ordering to) the output vertices");
+        if ((networkOutputs == null || networkOutputs.isEmpty()) && !allowNoOutput) {
+            throw new IllegalStateException("Invalid configuration: network has no outputs." +
+                    "Use .setOutput(String...) to specify (and give an ordering to) the output vertices, " +
+                    "or use allowNoOutputs(true) to disable this check");
         }
 
         //Check uniqueness of names for inputs, layers, GraphNodes
@@ -307,10 +318,12 @@ public class ComputationGraphConfiguration implements Serializable, Cloneable {
         }
 
         //Check output names:
-        for (String s : networkOutputs) {
-            if (!vertices.containsKey(s)) {
-                throw new IllegalStateException(
-                                "Invalid configuration: Output name \"" + s + "\" is not a valid vertex");
+        if(networkOutputs != null) {
+            for (String s : networkOutputs) {
+                if (!vertices.containsKey(s)) {
+                    throw new IllegalStateException(
+                            "Invalid configuration: Output name \"" + s + "\" is not a valid vertex");
+                }
             }
         }
 
@@ -329,7 +342,7 @@ public class ComputationGraphConfiguration implements Serializable, Cloneable {
             disconnected.addAll(networkInputs);
             disconnected.addAll(vertices.keySet());
             disconnected.removeAll(seenAsInput);
-            if(!disconnected.isEmpty()){
+            if(!disconnected.isEmpty() && !allowNoOutput){  //If allowing no output: by definition we have disconnected vertices
                 throw new IllegalStateException("Invalid configuration: disconnected vertices found - " + disconnected
                         + ". Disconnected vertices are those that do not connect to either another vertex, and are also"
                         + " not a network output. To disable this error (i.e., allow network configurations with" +
@@ -344,18 +357,42 @@ public class ComputationGraphConfiguration implements Serializable, Cloneable {
      * Add preprocessors automatically, given the specified types of inputs for the network. Inputs are specified using the
      * {@link InputType} class, in the same order in which the inputs were defined in the original configuration.<br>
      * For example, in a network with two inputs: a convolutional input (28x28x1 images) and feed forward inputs, use
-     * {@code .addPreProcessors(InputType.convolutional(1,28,28),InputType.feedForward())}.<br>
+     * {@code .addPreProcessors(InputType.convolutional(28,28,1),InputType.feedForward())}.<br>
      * For the CNN->Dense and CNN->RNN transitions, the nIns on the Dense/RNN layers will also be added automatically.
      * <b>NOTE</b>: This method will be called automatically when using the
      * {@link GraphBuilder#setInputTypes(InputType...)} functionality.
      * See that method for details.
      */
     public void addPreProcessors(InputType... inputTypes) {
+        getLayerActivationTypes(true, inputTypes);
+    }
+
+    /**
+     * For the given input shape/type for the network, return a map of activation sizes for each layer and vertex
+     * in the graph. Note that this method will automatically add preprocessors if required, to handle (for example)
+     * the transition between CNN and dense layers.
+     * @param inputTypes                Input types for the network
+     * @return A map of activation types for the graph (key: vertex name. value: type of activations out of that vertex)
+     */
+    public Map<String,InputType> getLayerActivationTypes(InputType... inputTypes){
+        return getLayerActivationTypes(true, inputTypes);
+    }
+
+    /**
+     * For the given input shape/type for the network, return a map of activation sizes for each layer and vertex
+     * in the graph. Note that this method can also add preprocessors if required (to handle transitions between some
+     * layer types such as convolutional -> dense, for example)
+     * @param addPreprocIfNecessary     If true: add any required preprocessors, in the process of calculating the layer
+     *                                  activation sizes
+     * @param inputTypes                Input types for the network
+     * @return A map of activation types for the graph (key: vertex name. value: type of activations out of that vertex)
+     */
+    public Map<String,InputType> getLayerActivationTypes(boolean addPreprocIfNecessary, InputType... inputTypes){
 
         if (inputTypes == null || inputTypes.length != networkInputs.size()) {
             throw new IllegalArgumentException(
-                            "Invalid number of InputTypes: cannot add preprocessors if number of InputType "
-                                            + "objects differs from number of network inputs");
+                    "Invalid number of InputTypes: cannot add preprocessors if number of InputType "
+                            + "objects differs from number of network inputs");
         }
 
         //Now: need to do essentially a forward pass through the network, to work out what type of preprocessors to add
@@ -388,7 +425,7 @@ public class ComputationGraphConfiguration implements Serializable, Cloneable {
                 Layer l = lv.getLayerConf().getLayer();
 
                 //Preprocessors - add if necessary
-                if (lv.getPreProcessor() == null) {
+                if (lv.getPreProcessor() == null && addPreprocIfNecessary) {
                     //But don't override preprocessors that are manually defined; if none has been defined,
                     //add the appropriate preprocessor for this input type/layer combination
                     InputPreProcessor preproc = l.getPreProcessorForInputType(layerInput);
@@ -414,9 +451,11 @@ public class ComputationGraphConfiguration implements Serializable, Cloneable {
             }
 
             InputType outputFromVertex =
-                            gv.getOutputType(currLayerIdx, inputTypeList.toArray(new InputType[inputTypeList.size()]));
+                    gv.getOutputType(currLayerIdx, inputTypeList.toArray(new InputType[inputTypeList.size()]));
             vertexOutputs.put(s, outputFromVertex);
         }
+
+        return vertexOutputs;
     }
 
     private Map<String, List<String>> verticesOutputTo() {
@@ -542,9 +581,10 @@ public class ComputationGraphConfiguration implements Serializable, Cloneable {
                         inputTypes);
     }
 
-
     @Data
     public static class GraphBuilder {
+        private static final int DEFAULT_TBPTT_LENGTH = 20;
+
         protected Map<String, GraphVertex> vertices = new LinkedHashMap<>();
 
         /**
@@ -559,14 +599,15 @@ public class ComputationGraphConfiguration implements Serializable, Cloneable {
         protected boolean pretrain = false;
         protected boolean backprop = true;
         protected BackpropType backpropType = BackpropType.Standard;
-        protected int tbpttFwdLength = 20;
-        protected int tbpttBackLength = 20;
+        protected int tbpttFwdLength = DEFAULT_TBPTT_LENGTH;
+        protected int tbpttBackLength = DEFAULT_TBPTT_LENGTH;
 
         protected Map<String, InputPreProcessor> inputPreProcessors = new LinkedHashMap<>();
 
         protected NeuralNetConfiguration.Builder globalConfiguration;
 
         protected boolean allowDisconnected = false;
+        protected boolean allowNoOutput = false;
 
         public GraphBuilder(NeuralNetConfiguration.Builder globalConfiguration) {
             this.globalConfiguration = globalConfiguration;
@@ -700,6 +741,19 @@ public class ComputationGraphConfiguration implements Serializable, Cloneable {
          *                    on a combination of the two.
          * @see #addLayer(String, Layer, InputPreProcessor, String...)
          */
+        public GraphBuilder layer(int layerName, Layer layer, String... layerInputs) {
+            return addLayer(String.valueOf(layerName), layer, null, layerInputs);
+        }
+
+        /**
+         * Add a layer, with no {@link InputPreProcessor}, with the specified name and specified inputs.
+         *
+         * @param layerName   Name/label of the layer to add
+         * @param layer       The layer configuration
+         * @param layerInputs Inputs to this layer (must be 1 or more). Inputs may be other layers, GraphVertex objects,
+         *                    on a combination of the two.
+         * @see #addLayer(String, Layer, InputPreProcessor, String...)
+         */
         public GraphBuilder layer(String layerName, Layer layer, String... layerInputs) {
             return addLayer(layerName, layer, null, layerInputs);
         }
@@ -802,10 +856,10 @@ public class ComputationGraphConfiguration implements Serializable, Cloneable {
          * (a) preprocessors can be automatically added, and<br>
          * (b) the nIns (input size) for each layer can be automatically calculated and set<br>
          * The order here is the same order as .addInputs(). Thus, if you do .addInputs("a","b") and .setInputTypes(InputType.feedForward(),
-         * InputType.convolutional(1,28,28)) then the input labelled "a" is a feed forward input, whereas the input labelled "b" in a CNN
+         * InputType.convolutional(28,28,1)) then the input labelled "a" is a feed forward input, whereas the input labelled "b" in a CNN
          * input, with 28x28x1 images as input.<br>
          * <b>Note</b>: Using setInputTypes is not always necessary, but can be especially helpful for example with CNNs such that
-         * the calculations on input/ouput sizes (width, height, depth, etc) don't need to be done manually.<br>
+         * the calculations on input/ouput sizes (width, height, channels, etc) don't need to be done manually.<br>
          * <b>Note 2</b>: If a preprocessor is manually added for a given layer, it will not be overridden by the automatic
          * addition of preprocessors.
          * <b>Note 3</b>: If a layer has an nIn set manually, this will not be overridden
@@ -868,9 +922,60 @@ public class ComputationGraphConfiguration implements Serializable, Cloneable {
         }
 
         /**
-         * Create the ComputationGraphConfiguration from the Builder pattern
+         * Used only during validation after building.<br>
+         * If true: don't throw an exception on configurations without any outputs. This is enabled by default
+         * to avoid creating invalid graphs, but can be disabled if required.<br>
+         * Most users can (and should) leave this as the default value of false.
+         *
+         * @param allowNoOutput Whether to allow no outputs, during validation
          */
-        public ComputationGraphConfiguration build() {
+        public GraphBuilder allowNoOutput(boolean allowNoOutput){
+            this.allowNoOutput = allowNoOutput;
+            return this;
+        }
+
+        /**
+         * For the (perhaps partially constructed) network configuration, return a map of activation sizes for each
+         * layer and vertex in the graph.<br>
+         * Note 1: The network configuration may be incomplete, but the inputs have been added to the layer already.<br>
+         * Note 2: To use this method, the network input types must have been set using {@link #setInputTypes(InputType...)}
+         * first
+         * @return A map of activation types for the graph (key: vertex name. value: type of activations out of that vertex)
+         */
+        public Map<String,InputType> getLayerActivationTypes(){
+            Preconditions.checkArgument(networkInputs != null && networkInputs.size() > 0,
+                    "Cannot calculate activation types if no inputs have been set (use addInputs(String...))");
+            Preconditions.checkArgument(networkInputTypes != null && networkInputTypes.size() == networkInputs.size(),
+                    "Cannot calculate layer activation types if network if network input types have not" +
+                            "been set (use ");
+
+            //Instantiate temporary ComputationGraphConfiguration and calculate output shapes
+            ComputationGraphConfiguration conf;
+            try{
+                conf = buildConfig();
+            } catch (Exception e){
+                throw new RuntimeException("Error calculating activation types for layers: error occured when constructing " +
+                        "temporary ComputationGraphConfiguration)", e);
+            }
+
+            try{
+                conf.validate(true, true);
+            } catch (Exception e){
+                throw new RuntimeException("Error calculating activation types for layers: validation of temporary" +
+                        " ComputationGraphConfiguration failed", e);
+            }
+
+            return conf.getLayerActivationTypes(true, networkInputTypes.toArray(new InputType[networkInputTypes.size()]));
+        }
+
+
+        private ComputationGraphConfiguration buildConfig(){
+            //Validate BackpropType setting
+            if((tbpttBackLength != DEFAULT_TBPTT_LENGTH || tbpttFwdLength != DEFAULT_TBPTT_LENGTH) && backpropType != BackpropType.TruncatedBPTT){
+                log.warn("Truncated backpropagation through time lengths have been configured with values " + tbpttFwdLength
+                        + " and " + tbpttBackLength + " but backprop type is set to " + backpropType + ". TBPTT configuration" +
+                        " settings will only take effect if backprop type is set to BackpropType.TruncatedBPTT");
+            }
 
             ComputationGraphConfiguration conf = new ComputationGraphConfiguration();
             conf.backprop = backprop;
@@ -899,8 +1004,8 @@ public class ComputationGraphConfiguration implements Serializable, Cloneable {
                     lv.setPreProcessor(entry.getValue());
                 } else {
                     throw new IllegalStateException(
-                                    "Invalid configuration: InputPreProcessor defined for GraphVertex \""
-                                                    + entry.getKey() + "\", but this vertex is not a LayerVertex");
+                            "Invalid configuration: InputPreProcessor defined for GraphVertex \""
+                                    + entry.getKey() + "\", but this vertex is not a LayerVertex");
                 }
 
             }
@@ -915,7 +1020,17 @@ public class ComputationGraphConfiguration implements Serializable, Cloneable {
 
             }
 
-            conf.validate(allowDisconnected); //throws exception for invalid configuration
+            return conf;
+        }
+
+
+        /**
+         * Create the ComputationGraphConfiguration from the Builder pattern
+         */
+        public ComputationGraphConfiguration build() {
+
+            ComputationGraphConfiguration conf = buildConfig();
+            conf.validate(allowDisconnected, allowNoOutput); //throws exception for invalid configuration
 
             //Automatically add preprocessors, set nIns for CNN->dense transitions, etc
             if (!networkInputTypes.isEmpty()) {

@@ -1,16 +1,16 @@
 package org.deeplearning4j.nn.conf.layers;
 
+import com.google.common.base.Preconditions;
 import lombok.Data;
 import lombok.EqualsAndHashCode;
 import lombok.NoArgsConstructor;
-import org.deeplearning4j.nn.api.ParamInitializer;
 import org.deeplearning4j.nn.conf.InputPreProcessor;
 import org.deeplearning4j.nn.conf.NeuralNetConfiguration;
 import org.deeplearning4j.nn.conf.inputs.InputType;
 import org.deeplearning4j.nn.conf.memory.LayerMemoryReport;
 import org.deeplearning4j.nn.conf.memory.MemoryReport;
-import org.deeplearning4j.nn.params.EmptyParamInitializer;
-import org.deeplearning4j.optimize.api.IterationListener;
+import org.deeplearning4j.optimize.api.TrainingListener;
+import org.deeplearning4j.util.ConvolutionUtils;
 import org.nd4j.linalg.api.ndarray.INDArray;
 
 import java.util.Arrays;
@@ -26,9 +26,17 @@ import java.util.Map;
 @Data
 @NoArgsConstructor
 @EqualsAndHashCode(callSuper = true)
-public class ZeroPaddingLayer extends Layer {
+public class ZeroPaddingLayer extends NoParamLayer {
 
     private int[] padding;
+
+    public ZeroPaddingLayer(int padTopBottom, int padLeftRight){
+        this(new Builder(padTopBottom, padLeftRight));
+    }
+
+    public ZeroPaddingLayer(int padTop, int padBottom, int padLeft, int padRight){
+        this(new Builder(padTop, padBottom, padLeft, padRight));
+    }
 
     private ZeroPaddingLayer(Builder builder) {
         super(builder);
@@ -42,11 +50,11 @@ public class ZeroPaddingLayer extends Layer {
 
     @Override
     public org.deeplearning4j.nn.api.Layer instantiate(NeuralNetConfiguration conf,
-                    Collection<IterationListener> iterationListeners, int layerIndex, INDArray layerParamsView,
+                    Collection<TrainingListener> trainingListeners, int layerIndex, INDArray layerParamsView,
                     boolean initializeParams) {
         org.deeplearning4j.nn.layers.convolution.ZeroPaddingLayer ret =
                         new org.deeplearning4j.nn.layers.convolution.ZeroPaddingLayer(conf);
-        ret.setListeners(iterationListeners);
+        ret.setListeners(trainingListeners);
         ret.setIndex(layerIndex);
         Map<String, INDArray> paramTable = initializer().init(conf, layerParamsView, initializeParams);
         ret.setParamTable(paramTable);
@@ -55,65 +63,19 @@ public class ZeroPaddingLayer extends Layer {
     }
 
     @Override
-    public ParamInitializer initializer() {
-        return EmptyParamInitializer.getInstance();
-    }
-
-    @Override
     public InputType getOutputType(int layerIndex, InputType inputType) {
-        int inH;
-        int inW;
-        int inDepth;
-        if (inputType instanceof InputType.InputTypeConvolutional) {
-            InputType.InputTypeConvolutional conv = (InputType.InputTypeConvolutional) inputType;
-            inH = conv.getHeight();
-            inW = conv.getWidth();
-            inDepth = conv.getDepth();
-        } else if (inputType instanceof InputType.InputTypeConvolutionalFlat) {
-            InputType.InputTypeConvolutionalFlat conv = (InputType.InputTypeConvolutionalFlat) inputType;
-            inH = conv.getHeight();
-            inW = conv.getWidth();
-            inDepth = conv.getDepth();
-        } else {
-            throw new IllegalStateException(
-                            "Invalid input type: expected InputTypeConvolutional or InputTypeConvolutionalFlat."
-                                            + " Got: " + inputType);
-        }
+        int[] hwd = ConvolutionUtils.getHWDFromInputType(inputType);
+        int outH = hwd[0] + padding[0] + padding[1];
+        int outW = hwd[1] + padding[2] + padding[3];
 
-        int outH = inH + padding[0] + padding[1];
-        int outW = inW + padding[2] + padding[3];
-
-        return InputType.convolutional(outH, outW, inDepth);
-    }
-
-    @Override
-    public void setNIn(InputType inputType, boolean override) {
-        //No op
+        return InputType.convolutional(outH, outW, hwd[2]);
     }
 
     @Override
     public InputPreProcessor getPreProcessorForInputType(InputType inputType) {
-        if (inputType == null) {
-            throw new IllegalStateException("Invalid input for ZeroPaddingLayer layer (layer name=\"" + getLayerName()
-                            + "\"): input is null");
-        }
-
+        Preconditions.checkArgument(inputType != null, "Invalid input for ZeroPaddingLayer layer (layer name=\""
+                + getLayerName() + "\"): InputType is null");
         return InputTypeUtil.getPreProcessorForInputTypeCnnLayers(inputType, getLayerName());
-    }
-
-    @Override
-    public double getL1ByParam(String paramName) {
-        return 0;
-    }
-
-    @Override
-    public double getL2ByParam(String paramName) {
-        return 0;
-    }
-
-    @Override
-    public boolean isPretrainParam(String paramName) {
-        throw new UnsupportedOperationException("ZeroPaddingLayer does not contain parameters");
     }
 
     @Override

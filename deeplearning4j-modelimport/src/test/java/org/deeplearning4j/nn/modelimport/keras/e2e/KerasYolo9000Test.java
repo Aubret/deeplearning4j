@@ -23,7 +23,9 @@ import org.deeplearning4j.nn.modelimport.keras.KerasLayer;
 import org.deeplearning4j.nn.modelimport.keras.KerasModel;
 import org.deeplearning4j.nn.modelimport.keras.layers.convolutional.KerasSpaceToDepth;
 import org.junit.Ignore;
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.TemporaryFolder;
 import org.nd4j.linalg.io.ClassPathResource;
 
 import java.io.File;
@@ -32,13 +34,13 @@ import java.nio.file.StandardCopyOption;
 
 /**
  * Import previously stored YOLO9000 Keras net from https://github.com/allanzelener/YAD2K.
- *
+ * <p>
  * git clone https://github.com/allanzelener/YAD2K
  * cd YAD2K
  * wget http://pjreddie.com/media/files/yolo.weights
  * wget https://raw.githubusercontent.com/pjreddie/darknet/master/cfg/yolo.cfg
  * python3 yad2k.py yolo.cfg yolo.weights yolo.h5
- *
+ * <p>
  * To run this test put the output of this script on the test resources path.
  *
  * @author Max Pumperla
@@ -48,6 +50,9 @@ public class KerasYolo9000Test {
 
     private static final String TEMP_MODEL_FILENAME = "tempModel";
     private static final String H5_EXTENSION = ".h5";
+
+    @Rule
+    public TemporaryFolder testDir = new TemporaryFolder();
 
     @Ignore
     @Test
@@ -60,7 +65,7 @@ public class KerasYolo9000Test {
         ClassPathResource modelResource =
                 new ClassPathResource(modelPath,
                         KerasModelEndToEndTest.class.getClassLoader());
-        File modelFile = File.createTempFile(TEMP_MODEL_FILENAME, H5_EXTENSION);
+        File modelFile = testDir.newFile(TEMP_MODEL_FILENAME + System.currentTimeMillis() + H5_EXTENSION);
         Files.copy(modelResource.getInputStream(), modelFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
         ComputationGraph model = new KerasModel().modelBuilder().modelHdf5Filename(modelFile.getAbsolutePath())
                 .enforceTrainingConfig(false).buildModel().getComputationGraph();

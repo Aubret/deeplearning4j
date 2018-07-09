@@ -1,11 +1,12 @@
 package org.deeplearning4j.nn.layers.objdetect;
 
-import org.apache.commons.io.FileUtils;
 import org.apache.commons.io.IOUtils;
 import org.datavec.api.records.reader.RecordReader;
 import org.datavec.api.split.FileSplit;
+import org.deeplearning4j.nn.conf.GradientNormalization;
+import org.junit.Rule;
+import org.junit.rules.TemporaryFolder;
 import org.nd4j.linalg.io.ClassPathResource;
-import org.datavec.image.recordreader.ImageRecordReader;
 import org.datavec.image.recordreader.objdetect.ObjectDetectionRecordReader;
 import org.datavec.image.recordreader.objdetect.impl.VocLabelProvider;
 import org.deeplearning4j.BaseDL4JTest;
@@ -27,10 +28,12 @@ import org.nd4j.linalg.api.ndarray.INDArray;
 import org.nd4j.linalg.dataset.DataSet;
 import org.nd4j.linalg.dataset.api.iterator.DataSetIterator;
 import org.nd4j.linalg.dataset.api.preprocessor.ImagePreProcessingScaler;
-import org.nd4j.linalg.factory.Broadcast;
 import org.nd4j.linalg.factory.Nd4j;
 import org.nd4j.linalg.learning.config.AdaDelta;
 import org.nd4j.linalg.learning.config.Adam;
+import org.deeplearning4j.nn.workspace.LayerWorkspaceMgr;
+import org.nd4j.linalg.schedule.MapSchedule;
+import org.nd4j.linalg.schedule.ScheduleType;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -47,6 +50,9 @@ import static org.junit.Assert.*;
 import static org.nd4j.linalg.indexing.NDArrayIndex.*;
 
 public class TestYolo2OutputLayer extends BaseDL4JTest {
+
+    @Rule
+    public TemporaryFolder tempDir = new TemporaryFolder();
 
     @Test
     public void testYoloActivateScoreBasic() {
@@ -80,7 +86,7 @@ public class TestYolo2OutputLayer extends BaseDL4JTest {
 
         INDArray input = Nd4j.rand(new int[]{mb, depth, h, w});
 
-        INDArray out = y2impl.activate(input);
+        INDArray out = y2impl.activate(input, false, LayerWorkspaceMgr.noWorkspaces());
         assertNotNull(out);
         assertArrayEquals(input.shape(), out.shape());
 
@@ -110,9 +116,9 @@ public class TestYolo2OutputLayer extends BaseDL4JTest {
         labels.putScalar(2, 2, 2, 2, 6);
         labels.putScalar(2, 3, 2, 2, 6);
 
-        y2impl.setInput(input);
+        y2impl.setInput(input, LayerWorkspaceMgr.noWorkspaces());
         y2impl.setLabels(labels);
-        double score = y2impl.computeScore(0, 0, true);
+        double score = y2impl.computeScore(0, 0, true, LayerWorkspaceMgr.noWorkspaces());
 
         System.out.println("SCORE: " + score);
         assertTrue(score > 0.0);
@@ -122,9 +128,9 @@ public class TestYolo2OutputLayer extends BaseDL4JTest {
         MultiLayerNetwork netLoaded = TestUtils.testModelSerialization(net);
 
         y2impl = (org.deeplearning4j.nn.layers.objdetect.Yolo2OutputLayer) netLoaded.getLayer(1);
-        y2impl.setInput(input);
+        y2impl.setInput(input, LayerWorkspaceMgr.noWorkspaces());
         y2impl.setLabels(labels);
-        double score2 = y2impl.computeScore(0, 0, true);
+        double score2 = y2impl.computeScore(0, 0, true, LayerWorkspaceMgr.noWorkspaces());
 
         assertEquals(score, score2, 1e-8);
     }
@@ -158,7 +164,7 @@ public class TestYolo2OutputLayer extends BaseDL4JTest {
 
         INDArray input = Nd4j.rand(new int[]{mb, depth, h, w});
 
-        INDArray out = y2impl.activate(input);
+        INDArray out = y2impl.activate(input, false, LayerWorkspaceMgr.noWorkspaces());
 
         assertEquals(4, out.rank());
 
@@ -194,7 +200,7 @@ public class TestYolo2OutputLayer extends BaseDL4JTest {
         InputStream is1 = new ClassPathResource("yolo/VOC_SingleImage/JPEGImages/2007_009346.jpg").getInputStream();
         InputStream is2 = new ClassPathResource("yolo/VOC_SingleImage/Annotations/2007_009346.xml").getInputStream();
 
-        File dir = Files.createTempDirectory("testYoloOverfitting").toFile();
+        File dir = tempDir.newFolder("testYoloOverfitting");
         File jpg = new File(dir, "JPEGImages");
         File annot = new File(dir, "Annotations");
         jpg.mkdirs();
@@ -399,7 +405,7 @@ public class TestYolo2OutputLayer extends BaseDL4JTest {
         InputStream is3 = new ClassPathResource("yolo/VOC_TwoImage/JPEGImages/2008_003344.jpg").getInputStream();
         InputStream is4 = new ClassPathResource("yolo/VOC_TwoImage/Annotations/2008_003344.xml").getInputStream();
 
-        File dir = Files.createTempDirectory("testYoloOverfitting").toFile();
+        File dir = tempDir.newFolder();
         File jpg = new File(dir, "JPEGImages");
         File annot = new File(dir, "Annotations");
         jpg.mkdirs();
@@ -426,12 +432,15 @@ public class TestYolo2OutputLayer extends BaseDL4JTest {
             IOUtils.copy(is4, fos);
         } finally { is4.close(); }
 
+        assertEquals(2, jpg.listFiles().length);
+        assertEquals(2, annot.listFiles().length);
+
         INDArray bbPriors = Nd4j.create(new double[][]{
                 {2,2},
                 {5,5}});
 
         //4x downsampling to 13x13 = 52x52 input images
-        //Required depth at output layer: 5B+C, with B=5, C=20 object classes, for VOC
+        //Required channels at output layer: 5B+C, with B=5, C=20 object classes, for VOC
         VocLabelProvider lp = new VocLabelProvider(dir.getPath());
         int h = 52;
         int w = 52;
@@ -459,15 +468,15 @@ public class TestYolo2OutputLayer extends BaseDL4JTest {
         MultiLayerConfiguration conf = new NeuralNetConfiguration.Builder()
                 .convolutionMode(ConvolutionMode.Same)
                 .updater(new Adam(1e-3))
+                .gradientNormalization(GradientNormalization.ClipElementWiseAbsoluteValue)
+                .gradientNormalizationThreshold(3)
                 .activation(Activation.LEAKYRELU)
                 .weightInit(WeightInit.RELU)
-                .seed(123456)
+                .seed(12345)
                 .list()
-                .layer(new ConvolutionLayer.Builder().kernelSize(3,3).stride(1,1).nOut(32).build())
-                .layer(new SubsamplingLayer.Builder().kernelSize(2,2).stride(2,2).build())
-                .layer(new ConvolutionLayer.Builder().kernelSize(3,3).stride(1,1).nOut(64).build())
-                .layer(new SubsamplingLayer.Builder().kernelSize(2,2).stride(2,2).build())
-                .layer(new ConvolutionLayer.Builder().activation(Activation.IDENTITY).kernelSize(3,3).stride(1,1).nOut(depthOut).build())
+                .layer(new ConvolutionLayer.Builder().kernelSize(5,5).stride(2,2).nOut(256).build())
+                .layer(new SubsamplingLayer.Builder().kernelSize(2,2).stride(2,2)/*.poolingType(SubsamplingLayer.PoolingType.AVG)*/.build())
+                .layer(new ConvolutionLayer.Builder().activation(Activation.IDENTITY).kernelSize(5,5).stride(1,1).nOut(depthOut).build())
                 .layer(new Yolo2OutputLayer.Builder()
                         .boundingBoxPriors(bbPriors)
                         .build())
@@ -478,7 +487,7 @@ public class TestYolo2OutputLayer extends BaseDL4JTest {
         net.init();
         net.setListeners(new ScoreIterationListener(100));
 
-        int nEpochs = 1500;
+        int nEpochs = 1000;
         DataSet ds = iter.next();
         URI[] uris = fileSplit.locations();
         if (!uris[0].getPath().contains("2007_009346")) {
@@ -491,7 +500,7 @@ public class TestYolo2OutputLayer extends BaseDL4JTest {
         }
 
         org.deeplearning4j.nn.layers.objdetect.Yolo2OutputLayer ol =
-                (org.deeplearning4j.nn.layers.objdetect.Yolo2OutputLayer) net.getLayer(5);
+                (org.deeplearning4j.nn.layers.objdetect.Yolo2OutputLayer) net.getLayer(3);
 
         INDArray out = net.output(ds.getFeatures());
 
@@ -543,8 +552,8 @@ public class TestYolo2OutputLayer extends BaseDL4JTest {
         double p1 = o1.getClassPredictions().getDouble(idxCat);
         double c1 = o1.getConfidence();
         assertEquals(idxCat, o1.getPredictedClass() );
-        assertTrue(String.valueOf(p1), p1 >= 0.9);
-        assertTrue(String.valueOf(c1), c1 >= 0.9);
+        assertTrue(String.valueOf(p1), p1 >= 0.85);
+        assertTrue(String.valueOf(c1), c1 >= 0.85);
         assertEquals(cx1, o1.getCenterX(), 0.1);
         assertEquals(cy1, o1.getCenterY(), 0.1);
         assertEquals(wGrid1, o1.getWidth(), 0.2);
@@ -555,8 +564,8 @@ public class TestYolo2OutputLayer extends BaseDL4JTest {
         double p2 = o2.getClassPredictions().getDouble(idxCat);
         double c2 = o2.getConfidence();
         assertEquals(idxCat, o2.getPredictedClass() );
-        assertTrue(String.valueOf(p2), p2 >= 0.9);
-        assertTrue(String.valueOf(c2), c2 >= 0.9);
+        assertTrue(String.valueOf(p2), p2 >= 0.85);
+        assertTrue(String.valueOf(c2), c2 >= 0.85);
         assertEquals(cx2, o2.getCenterX(), 0.1);
         assertEquals(cy2, o2.getCenterY(), 0.1);
         assertEquals(wGrid2, o2.getWidth(), 0.2);
